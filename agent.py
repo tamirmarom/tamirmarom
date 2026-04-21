@@ -27,7 +27,7 @@ import anthropic
 # ---------------------------------------------------------------------------
 
 MODEL = "claude-opus-4-7"
-NOTEPAD_FILE = "notepad.txt"
+NOTEPADS_DIR = Path("notepads")  # one .txt file per prospect lives here
 
 # System prompt is cached so repeated calls don't re-pay full input cost.
 SYSTEM_PROMPT = """\
@@ -141,6 +141,15 @@ _STATUS_LABEL = {
 }
 
 
+def _prospect_path(name: str) -> Path:
+    """Return the notepad Path for this prospect, creating the directory if needed."""
+    NOTEPADS_DIR.mkdir(exist_ok=True)
+    # "John Smith" → "john_smith.txt"; keep only alphanum and spaces, then slugify.
+    slug = "_".join(name.strip().lower().split()) if name.strip() else "unknown_prospect"
+    slug = "".join(c if c.isalnum() or c == "_" else "" for c in slug) or "unknown_prospect"
+    return NOTEPADS_DIR / f"{slug}.txt"
+
+
 def _wrap(text: str, width: int = 56, indent: str = "  ") -> list[str]:
     """Simple word-wrap returning a list of lines."""
     words = text.split()
@@ -158,8 +167,8 @@ def _wrap(text: str, width: int = 56, indent: str = "  ") -> list[str]:
 
 
 def save_to_notepad(data: dict) -> str:
-    """Append a formatted call record to the notepad file and return the path."""
-    notepad_path = Path(NOTEPAD_FILE)
+    """Append a formatted call record to this prospect's notepad file."""
+    notepad_path = _prospect_path(data.get("prospect_name", ""))
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status_raw = data.get("confirmation_status", "pending")
     status_label = _STATUS_LABEL.get(status_raw, status_raw.upper())
