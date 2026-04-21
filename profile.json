@@ -1,0 +1,42 @@
+{
+  "first_name": "Alex",
+  "date_of_birth": "1995-06-15",
+  "gender": "Man",
+  "show_gender": true,
+  "sexuality": "Straight",
+  "show_sexuality": false,
+  "height_ft": 5,
+  "height_in": 11,
+  "hometown": "New York, NY",
+  "current_location": "New York, NY",
+  "ethnicity": [],
+  "religion": "",
+  "politics": "",
+  "education": "Columbia University",
+  "job_title": "Software Engineer",
+  "company": "",
+  "drinking": "Socially",
+  "smoking": "Never",
+  "marijuana": "Never",
+  "drugs": "Never",
+  "looking_for": "Long-term relationship",
+  "family_plans": "Don't want children",
+  "photos": [
+    "photos/photo1.jpg"
+  ],
+  "prompts": [
+    {
+      "prompt": "A life goal of mine",
+      "answer": "To build something that genuinely makes people's lives better."
+    },
+    {
+      "prompt": "I get along best with people who",
+      "answer": "Can laugh at themselves and aren't afraid to be curious about the world."
+    },
+    {
+      "prompt": "My most irrational fear",
+      "answer": "That I left the stove on. Every single time I leave the house."
+    }
+  ],
+  "phone_number": ""
+}
