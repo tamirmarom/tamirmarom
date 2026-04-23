@@ -15,8 +15,12 @@ Then select one of three modes:
   3  Demo mode       — run the built-in example
 """
 
+import io
 import os
+import queue
 import sys
+import threading
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +32,10 @@ import anthropic
 
 MODEL = "claude-opus-4-7"
 NOTEPADS_DIR = Path("notepads")  # one .txt file per prospect lives here
+
+REALTIME_SAMPLE_RATE = 16000   # Hz — Whisper works best at 16 kHz
+REALTIME_CHUNK_SEC   = 3       # seconds of audio buffered before each Whisper call
+REALTIME_SILENCE_RMS = 0.01    # RMS amplitude below this → skip chunk (silence)
 
 # System prompt is cached so repeated calls don't re-pay full input cost.
 SYSTEM_PROMPT = """\
@@ -340,6 +348,36 @@ def run_agent(transcript: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Real-time transcription helpers
+# ---------------------------------------------------------------------------
+
+
+def _audio_to_wav_buffer(audio: "np.ndarray") -> io.BytesIO:
+    """Convert a float32 numpy array recorded at REALTIME_SAMPLE_RATE to a WAV buffer."""
+    import numpy as np  # noqa: PLC0415 — imported lazily so missing pkg gives a clear error
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("int16")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(REALTIME_SAMPLE_RATE)
+        wf.writeframes(pcm.tobytes())
+    buf.seek(0)
+    buf.name = "chunk.wav"  # openai SDK reads .name to determine mime type
+    return buf
+
+
+def _transcribe_chunk(oai_client, wav_buf: io.BytesIO) -> str:
+    """Send a WAV buffer to Whisper and return the transcribed text."""
+    result = oai_client.audio.transcriptions.create(
+        model="whisper-1",
+        file=wav_buf,
+        language="en",
+    )
+    return result.text.strip()
+
+
+# ---------------------------------------------------------------------------
 # Demo transcript
 # ---------------------------------------------------------------------------
 
@@ -452,6 +490,111 @@ def demo_mode() -> None:
     run_agent(DEMO_TRANSCRIPT)
 
 
+def realtime_mode() -> None:
+    """Capture mic audio in real time, transcribe via Whisper, then analyze with Claude."""
+    try:
+        import numpy as np
+        import sounddevice as sd
+    except ImportError as exc:
+        sys.exit(
+            f"  Error: {exc}.\n"
+            "  Install with:  pip install sounddevice numpy openai"
+        )
+
+    oai_key = os.environ.get("OPENAI_API_KEY")
+    if not oai_key:
+        sys.exit("  Error: OPENAI_API_KEY environment variable is not set (needed for Whisper).")
+
+    from openai import OpenAI  # noqa: PLC0415
+    oai_client = OpenAI(api_key=oai_key)
+
+    audio_q: "queue.Queue[np.ndarray | None]" = queue.Queue()
+    transcript_parts: list[str] = []
+    stop_event = threading.Event()
+
+    chunk_frames = REALTIME_SAMPLE_RATE * REALTIME_CHUNK_SEC
+
+    # ── Recording thread ───────────────────────────────────────────────────
+    def _record() -> None:
+        buffer: list[np.ndarray] = []
+        frames_collected = 0
+
+        def _callback(indata: np.ndarray, frames: int, time_info, status) -> None:
+            nonlocal frames_collected
+            buffer.append(indata[:, 0].copy())
+            frames_collected += frames
+            if frames_collected >= chunk_frames:
+                audio_q.put(np.concatenate(buffer))
+                buffer.clear()
+                frames_collected = 0
+
+        with sd.InputStream(
+            samplerate=REALTIME_SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            callback=_callback,
+            blocksize=1024,
+        ):
+            stop_event.wait()
+
+        # Flush any remaining audio
+        if buffer:
+            audio_q.put(np.concatenate(buffer))
+        audio_q.put(None)  # sentinel
+
+    # ── Transcription thread ───────────────────────────────────────────────
+    def _transcribe() -> None:
+        while True:
+            chunk = audio_q.get()
+            if chunk is None:
+                break
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            if rms < REALTIME_SILENCE_RMS:
+                continue  # silent chunk — skip API call
+            try:
+                wav_buf = _audio_to_wav_buffer(chunk)
+                text = _transcribe_chunk(oai_client, wav_buf)
+            except Exception as exc:  # noqa: BLE001
+                print(f"\n  [Whisper error: {exc}]")
+                continue
+            if text:
+                transcript_parts.append(text)
+                print(f"  {text}")
+
+    print()
+    print("  REAL-TIME MODE")
+    print("  Speak into your microphone. Transcription appears below.")
+    print("  Press  Enter  (or Ctrl+C) when the call is over.")
+    print()
+
+    rec_thread = threading.Thread(target=_record, daemon=True)
+    tr_thread  = threading.Thread(target=_transcribe, daemon=True)
+    rec_thread.start()
+    tr_thread.start()
+
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    print("\n  ● Stopping recording…")
+    stop_event.set()
+    rec_thread.join()
+    tr_thread.join()
+
+    full_transcript = " ".join(transcript_parts).strip()
+    if not full_transcript:
+        print("  No speech detected — nothing to analyze.")
+        return
+
+    print("\n  ─ Full transcript ─────────────────────────────────────────")
+    for line in full_transcript.splitlines():
+        print(f"  {line}")
+    print("  ───────────────────────────────────────────────────────────\n")
+
+    run_agent(full_transcript)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -467,6 +610,7 @@ def main() -> None:
     print("    1  Live mode       — enter turns one by one")
     print("    2  Transcript mode — paste a full transcript")
     print("    3  Demo mode       — run the built-in example")
+    print("    4  Real-time mode  — live mic transcription via Whisper")
     print("    q  Quit")
     print()
 
@@ -483,6 +627,8 @@ def main() -> None:
         "transcript": transcript_mode,
         "3": demo_mode,
         "demo": demo_mode,
+        "4": realtime_mode,
+        "realtime": realtime_mode,
     }
 
     fn = dispatch.get(choice)
